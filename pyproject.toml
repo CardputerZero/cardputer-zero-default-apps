@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cardputer-zero-default-apps"
+version = "0.1.0"
+description = "Default small-screen Linux applications for Cardputer Zero Shell"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "VicLiu" }]
+dependencies = []
+
+[project.scripts]
+czero-app = "czero_apps.main:main"
+zero-settings = "czero_apps.apps.settings.app:run"
+zero-terminal = "czero_apps.apps.terminal.app:run"
+zero-files = "czero_apps.apps.files.app:run"
+zero-power-menu = "czero_apps.apps.power.app:run"
+zero-system-monitor = "czero_apps.apps.monitor.app:run"
+zero-app-store = "czero_apps.apps.store.app:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]

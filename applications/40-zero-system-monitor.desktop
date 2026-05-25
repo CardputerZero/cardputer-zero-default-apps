@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=System Monitor
+Comment=Cardputer Zero system monitor
+Exec=/usr/bin/zero-system-monitor
+TryExec=/usr/bin/zero-system-monitor
+Icon=share/images/system-monitor.png
+Terminal=false
+Categories=System;Monitor;
+X-Zero-AppId=dev.cardputerzero.defaultapps.monitor
+X-Zero-ShortName=MONITOR
+X-Zero-Display=wayland

@@ -1,0 +1,6 @@
+from __future__ import annotations
+
+BACK_HINT = "ESC BACK"
+SELECT_HINT = "ENTER SELECT"
+OPEN_HINT = "ENTER OPEN"
+QUIT_HINT = "CTRL+Q QUIT"

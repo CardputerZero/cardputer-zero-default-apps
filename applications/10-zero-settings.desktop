@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=Cardputer Zero settings
+Exec=/usr/bin/zero-settings
+TryExec=/usr/bin/zero-settings
+Icon=share/images/settings.png
+Terminal=false
+Categories=Settings;System;
+X-Zero-AppId=dev.cardputerzero.defaultapps.settings
+X-Zero-ShortName=SETTINGS
+X-Zero-Display=wayland

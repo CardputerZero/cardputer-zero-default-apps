@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Open a Cardputer Zero terminal
+Exec=/usr/bin/zero-terminal
+TryExec=/usr/bin/zero-terminal
+Icon=share/images/terminal.png
+Terminal=false
+Categories=System;TerminalEmulator;
+X-Zero-AppId=dev.cardputerzero.defaultapps.terminal
+X-Zero-ShortName=TERMINAL
+X-Zero-Display=wayland

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Small-screen file manager
+Exec=/usr/bin/zero-files
+TryExec=/usr/bin/zero-files
+Icon=share/images/files.png
+Terminal=false
+Categories=System;FileManager;
+X-Zero-AppId=dev.cardputerzero.defaultapps.files
+X-Zero-ShortName=FILES
+X-Zero-Display=wayland

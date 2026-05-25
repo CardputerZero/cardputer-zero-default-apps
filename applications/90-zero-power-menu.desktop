@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Power
+Comment=Power actions for Cardputer Zero
+Exec=/usr/bin/zero-power-menu
+TryExec=/usr/bin/zero-power-menu
+Icon=share/images/power.png
+Terminal=false
+Categories=System;
+X-Zero-AppId=dev.cardputerzero.defaultapps.power
+X-Zero-ShortName=POWER
+X-Zero-Display=wayland

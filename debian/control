@@ -1,0 +1,15 @@
+Source: cardputer-zero-default-apps
+Section: x11
+Priority: optional
+Maintainer: VicLiu <vicliu@example.com>
+Build-Depends: debhelper-compat (= 13), dh-python, python3, python3-setuptools
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: cardputer-zero-default-apps
+Architecture: all
+Depends: ${misc:Depends}, ${python3:Depends}, python3, python3-gi, gir1.2-gtk-4.0, gir1.2-gtk-3.0
+Recommends: foot, brightnessctl, network-manager, pipewire-pulse | pulseaudio-utils, libglib2.0-bin, trash-cli, packagekit
+Description: default small-screen apps for Cardputer Zero Shell
+ GTK4 Wayland applications for Cardputer Zero Shell, including Settings,
+ Terminal, Files, Power, System Monitor, and App Store entry points.

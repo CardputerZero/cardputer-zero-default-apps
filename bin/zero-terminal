@@ -1,0 +1,3 @@
+#!/bin/sh
+export GDK_BACKEND=wayland
+exec python3 -m czero_apps.main terminal "$@"

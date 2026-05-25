@@ -1,0 +1,2 @@
+#!/bin/sh
+exec python3 -m czero_apps.main files "$@"

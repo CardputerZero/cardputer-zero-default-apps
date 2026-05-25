@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=App Store
+Comment=Install Cardputer Zero apps
+Exec=/usr/bin/zero-app-store
+TryExec=/usr/bin/zero-app-store
+Icon=share/images/app-store.png
+Terminal=false
+Categories=System;PackageManager;
+X-Zero-AppId=dev.cardputerzero.defaultapps.store
+X-Zero-ShortName=STORE
+X-Zero-Display=wayland
