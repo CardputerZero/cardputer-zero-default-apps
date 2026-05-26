@@ -20,6 +20,7 @@ zero-files = "czero_apps.apps.files.app:run"
 zero-power-menu = "czero_apps.apps.power.app:run"
 zero-system-monitor = "czero_apps.apps.monitor.app:run"
 zero-app-store = "czero_apps.apps.store.app:run"
+zero-robot = "czero_apps.apps.robot.app:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

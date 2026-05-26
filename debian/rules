@@ -4,4 +4,4 @@
 	dh $@ --with python3
 
 override_dh_auto_install:
-	DESTDIR=$(CURDIR)/debian/cardputer-zero-default-apps ./install.sh
+	SKIP_ROBOT_RUNTIME=1 DESTDIR=$(CURDIR)/debian/cardputer-zero-default-apps ./install.sh

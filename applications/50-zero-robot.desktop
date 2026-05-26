@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Robot
+Comment=Small-screen Pi agent frontend
+Exec=/usr/bin/zero-robot
+TryExec=/usr/bin/zero-robot
+Icon=share/images/robot.png
+Terminal=false
+Categories=Utility;Development;System;
+X-Zero-AppId=dev.cardputerzero.defaultapps.robot
+X-Zero-ShortName=ROBOT
+X-Zero-Display=wayland

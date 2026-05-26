@@ -19,6 +19,7 @@ This repository owns the default application UI and thin backend adapters for:
 - System Monitor
 - Power
 - Terminal
+- Robot
 
 It does not own:
 
@@ -222,6 +223,42 @@ terminal window.
 
 ![Terminal](docs/assets/screenshots/terminal.png)
 
+## Robot
+
+`zero-robot` is a small-screen Pi agent frontend. It connects keyboard text
+input and optional speech-to-text transcripts to `pi --mode rpc`, then renders
+agent status, tool activity, output, and errors in a 320x170 Cardputer Zero
+interface.
+
+Robot does not implement a new agent runtime or a new permission model. Its
+tools selector maps directly to Pi tool allowlists:
+
+```text
+SAFE -> --tools read,grep,find,ls
+EDIT -> --tools read,grep,find,ls,edit,write
+FULL -> --tools read,grep,find,ls,edit,write,bash
+```
+
+Robot intentionally does not show per-tool approval prompts. The selected tools
+profile is the permission boundary exposed by the app; execution semantics
+belong to Pi, the current Linux user, and standard Linux authorization systems.
+Speech-to-text is treated only as an input adapter: the transcript is shown
+before it is used as a Pi prompt.
+
+The app includes a compact settings page for the pieces that would otherwise be
+hard to configure on a handheld screen:
+
+- Pi tools profile
+- working directory
+- Pi command
+- provider
+- model
+- session directory
+- offline mode
+- recorder backend
+- recording duration
+- speech-to-text model
+
 ## Desktop Entries
 
 The installer writes APPLaunch entries to:
@@ -237,6 +274,7 @@ Current entries:
 20-zero-terminal.desktop
 30-zero-files.desktop
 40-zero-system-monitor.desktop
+50-zero-robot.desktop
 90-zero-power-menu.desktop
 100-zero-app-store.desktop
 ```
@@ -247,6 +285,9 @@ Each desktop entry declares Cardputer Zero metadata such as:
 X-Zero-AppId=...
 X-Zero-Display=wayland
 ```
+
+Launcher icons are installed as PNG assets under
+`/usr/share/APPLaunch/share/images/`.
 
 ## Install
 
@@ -260,8 +301,17 @@ Recommended packages:
 
 ```sh
 sudo apt-get install foot brightnessctl network-manager pipewire-pulse \
-  libglib2.0-bin trash-cli packagekit
+  libglib2.0-bin trash-cli packagekit alsa-utils ffmpeg
 ```
+
+Robot also expects Pi for execution and the Python OpenAI package plus
+`OPENAI_API_KEY` for speech-to-text. When those optional pieces are missing,
+`zero-robot` shows an unavailable/error state rather than crashing.
+During a real `sudo ./install.sh` install, the script prepares the Robot runtime
+by installing `nodejs`, `npm`, and `@earendil-works/pi-coding-agent` when `pi`
+is missing.
+Set `SKIP_ROBOT_RUNTIME=1` to skip this network/package-manager step, which is
+what Debian packaging does.
 
 Install from the source tree:
 
@@ -278,6 +328,7 @@ Installed paths:
 /usr/bin/zero-power-menu
 /usr/bin/zero-system-monitor
 /usr/bin/zero-app-store
+/usr/bin/zero-robot
 /usr/lib/python3/dist-packages/czero_apps/
 /usr/share/APPLaunch/applications/*.desktop
 /usr/share/APPLaunch/icons/*.svg
@@ -293,6 +344,7 @@ PYTHONPATH=src python3 -m czero_apps.main monitor
 PYTHONPATH=src python3 -m czero_apps.main files
 PYTHONPATH=src python3 -m czero_apps.main terminal
 PYTHONPATH=src python3 -m czero_apps.main power
+PYTHONPATH=src python3 -m czero_apps.main robot
 ```
 
 Syntax check:

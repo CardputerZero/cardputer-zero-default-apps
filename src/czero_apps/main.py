@@ -10,6 +10,7 @@ APP_MODULES = {
     "power": "czero_apps.apps.power.app",
     "monitor": "czero_apps.apps.monitor.app",
     "store": "czero_apps.apps.store.app",
+    "robot": "czero_apps.apps.robot.app",
 }
 
 
