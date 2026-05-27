@@ -1,0 +1,15 @@
+* text=auto
+
+*.sh text eol=lf
+install.sh text eol=lf
+uninstall.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.desktop text eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg text eol=lf

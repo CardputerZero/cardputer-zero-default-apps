@@ -13,12 +13,15 @@ from typing import Literal
 
 import cairo
 
-from czero_apps.ui.gtk import Gdk, GLib, Gtk
+from czero_apps.ui.gtk import Gdk, GLib, Gtk, Pango, PangoCairo
+from czero_apps.ui.ime import ImeCursor, InputMethodBridge
 from czero_apps.ui.theme import load_css
+from czero_apps.system.single_instance import run_single_instance
 
 
 WIDTH = 320
 HEIGHT = 170
+APP_ID = "dev.cardputerzero.defaultapps.robot"
 MAIN_H = 150
 BOTTOM_H = 20
 
@@ -141,6 +144,26 @@ def color(ctx: cairo.Context, value: str) -> None:
     ctx.set_source_rgb(*hex_to_rgb(value))
 
 
+def needs_shaped_text(value: str) -> bool:
+    return any(ord(ch) > 127 for ch in value)
+
+
+def pango_font(size: int, bold: bool = False) -> Pango.FontDescription:
+    desc = Pango.FontDescription()
+    desc.set_family("monospace, Noto Sans CJK SC, WenQuanYi Micro Hei, Sans")
+    desc.set_size(size * Pango.SCALE)
+    desc.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
+    return desc
+
+
+def shaped_text_width(ctx: cairo.Context, value: str, size: int = 8, bold: bool = False) -> int:
+    layout = PangoCairo.create_layout(ctx)
+    layout.set_font_description(pango_font(size, bold))
+    layout.set_text(value, -1)
+    width, _height = layout.get_pixel_size()
+    return width
+
+
 def fill(ctx: cairo.Context, x: int, y: int, w: int, h: int, value: str) -> None:
     color(ctx, value)
     ctx.rectangle(x, y, w, h)
@@ -172,6 +195,13 @@ def text(
     bold: bool = False,
 ) -> None:
     color(ctx, fg)
+    if needs_shaped_text(value):
+        layout = PangoCairo.create_layout(ctx)
+        layout.set_font_description(pango_font(size, bold))
+        layout.set_text(value, -1)
+        ctx.move_to(x, y - size)
+        PangoCairo.show_layout(ctx, layout)
+        return
     ctx.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
     ctx.set_font_size(size)
     ctx.move_to(x, y)
@@ -180,6 +210,10 @@ def text(
 
 def text_center(ctx: cairo.Context, value: str, cx: int, y: int, fg: str = INK_BLACK, size: int = 8, bold: bool = False) -> None:
     color(ctx, fg)
+    if needs_shaped_text(value):
+        width = shaped_text_width(ctx, value, size, bold)
+        text(ctx, value, int(cx - width / 2), y, fg, size, bold)
+        return
     ctx.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD if bold else cairo.FONT_WEIGHT_NORMAL)
     ctx.set_font_size(size)
     ext = ctx.text_extents(value)
@@ -206,6 +240,12 @@ class AgentEvent:
     text: str
 
 
+@dataclass
+class ConversationTurn:
+    prompt: str
+    response: str
+
+
 @dataclass(frozen=True)
 class SettingsItem:
     key: str
@@ -224,6 +264,7 @@ class RobotState:
     transcript: str = ""
     status: str = "READY"
     events: list[AgentEvent] = field(default_factory=list)
+    turns: list[ConversationTurn] = field(default_factory=list)
     result_lines: list[str] = field(default_factory=list)
     last_message: str = ""
     error: str = ""
@@ -427,90 +468,144 @@ class PiBackend:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            events.put(AgentEvent("log", raw))
+            events.put(AgentEvent("status", "agent output"))
             return ""
         kind = str(payload.get("type") or payload.get("event") or "event")
-        event_kind = self._map_event_kind(kind, payload if isinstance(payload, dict) else None)
-        text_value = clean_agent_text(self._extract_text(payload))
-        if text_value:
-            events.put(AgentEvent(event_kind, text_value))
-        elif event_kind in {"status", "tool", "error"}:
-            events.put(AgentEvent(event_kind, kind.replace("_", " ")))
+        event = self._event_from_payload(kind, payload)
+        if event is not None:
+            text_value = event.text if event.kind == "delta" else clean_agent_text(event.text)
+            if text_value:
+                events.put(AgentEvent(event.kind, text_value))
         return kind
 
     @staticmethod
-    def _map_event_kind(kind: str, payload: dict | None = None) -> str:
-        if kind == "response" and payload and payload.get("success") is False:
-            return "error"
-        if kind in {"agent_start", "queue_update"}:
-            return "status"
-        if kind in {"message", "message_update", "assistant_message"}:
-            return "delta"
-        if kind in {"message_start", "message_end", "turn_start", "turn_end", "agent_end"}:
-            return "status"
-        if kind in {"agent_response"}:
-            return "final"
+    def _event_from_payload(kind: str, payload: dict) -> AgentEvent | None:
         if kind == "response":
-            return "status"
+            if payload.get("success") is False:
+                return AgentEvent("error", str(payload.get("error") or "command failed"))
+            return AgentEvent("status", "accepted")
+
+        if kind == "message_update":
+            return PiBackend._message_update_event(payload)
+
+        if kind in {"message_end", "turn_end"}:
+            text_value = PiBackend._assistant_message_text(payload.get("message"))
+            if text_value:
+                return AgentEvent("final", text_value)
+            return AgentEvent("status", "message done")
+
+        if kind == "agent_end":
+            text_value = PiBackend._last_assistant_text(payload.get("messages"))
+            if text_value:
+                return AgentEvent("final", text_value)
+            return None
+
+        if kind in {"agent_response", "assistant_message", "message"}:
+            text_value = PiBackend._assistant_message_text(payload.get("message")) or PiBackend._assistant_message_text(payload)
+            if text_value:
+                return AgentEvent("final", text_value)
+            return None
+
+        if kind in {"agent_start", "turn_start", "message_start"}:
+            return AgentEvent("status", "work")
+
+        if kind in {"queue_update"}:
+            return AgentEvent("status", "queued")
+
+        if kind in {"compaction_start", "compaction_end"}:
+            return AgentEvent("status", "compact")
+
+        if kind in {"auto_retry_start", "auto_retry_end"}:
+            return AgentEvent("status", "retry")
+
         if kind.startswith("tool_execution"):
-            return "tool"
-        if kind in {"agent_end", "done"}:
-            return "done"
-        if "error" in kind:
-            return "error"
-        return kind
+            tool_name = payload.get("toolName") or payload.get("name") or "tool"
+            return AgentEvent("status", f"tool {tool_name}")
+
+        if kind == "extension_ui_request":
+            method = str(payload.get("method") or "ui")
+            if method == "notify":
+                notify_type = str(payload.get("notifyType") or "info")
+                if notify_type == "error":
+                    return AgentEvent("error", str(payload.get("message") or "agent notification"))
+            return AgentEvent("status", f"ui {method}")
+
+        if kind in {"extension_error"} or "error" in kind:
+            return AgentEvent("error", str(payload.get("error") or payload.get("errorMessage") or kind.replace("_", " ")))
+
+        if kind in {"done"}:
+            return None
+
+        return AgentEvent("status", kind.replace("_", " "))
 
     @staticmethod
-    def _extract_text(payload: object) -> str:
-        if isinstance(payload, str):
-            return payload
-        if isinstance(payload, dict):
-            event_type = payload.get("type")
-            if event_type in {"agent_end", "message_end", "turn_end"}:
-                return ""
-            if event_type in {"message_start", "turn_start", "agent_start"}:
-                return ""
-            if event_type == "response":
-                command = payload.get("command", "command")
-                success = payload.get("success")
-                if success is False:
-                    return str(payload.get("error") or f"{command} failed")
-                return f"{command} accepted"
-            if event_type == "extension_ui_request":
-                method = payload.get("method", "ui")
-                title = payload.get("title") or payload.get("message") or method
-                return f"ui {method}: {title}"
-            for key in (
-                "text",
-                "summary",
-                "content",
+    def _message_update_event(payload: dict) -> AgentEvent | None:
+        assistant_event = payload.get("assistantMessageEvent")
+        if not isinstance(assistant_event, dict):
+            return AgentEvent("status", "stream")
+        event_type = str(assistant_event.get("type") or "")
+        if event_type == "text_delta":
+            return AgentEvent(
                 "delta",
-                "output",
-                "result",
-                "error",
-                "messages",
-            ):
-                value = payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-                if isinstance(value, list):
-                    text_parts = [PiBackend._extract_text(item) for item in value]
-                    joined = " ".join(part for part in text_parts if part)
-                    if joined:
-                        return joined
-            nested = (
-                payload.get("assistantMessageEvent")
-                or payload.get("partialResult")
-                or payload.get("item")
-                or payload.get("data")
-                or payload.get("payload")
-                or payload.get("args")
+                str(
+                    assistant_event.get("delta")
+                    or assistant_event.get("text")
+                    or assistant_event.get("content")
+                    or ""
+                ),
             )
-            if nested is not None:
-                return PiBackend._extract_text(nested)
-        if isinstance(payload, list):
-            return " ".join(part for item in payload if (part := PiBackend._extract_text(item)))
+        if event_type == "text_end":
+            text_value = PiBackend._text_content(assistant_event.get("content"))
+            if text_value:
+                return AgentEvent("final", text_value)
+            return AgentEvent("status", "answer")
+        if event_type.startswith("thinking"):
+            return AgentEvent("status", "work")
+        if event_type.startswith("toolcall"):
+            return AgentEvent("status", "tool")
+        if event_type == "error":
+            return AgentEvent("error", str(assistant_event.get("reason") or "agent error"))
+        if event_type == "done":
+            return AgentEvent("status", "done")
+        return AgentEvent("status", "stream")
+
+    @staticmethod
+    def _last_assistant_text(messages: object) -> str:
+        if not isinstance(messages, list):
+            return ""
+        for message in reversed(messages):
+            text_value = PiBackend._assistant_message_text(message)
+            if text_value:
+                return text_value
         return ""
+
+    @staticmethod
+    def _assistant_message_text(message: object) -> str:
+        if not isinstance(message, dict):
+            return ""
+        role = str(message.get("role") or "assistant")
+        if role != "assistant":
+            return ""
+        text_value = PiBackend._text_content(message.get("content"))
+        if text_value:
+            return text_value
+        value = message.get("text")
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _text_content(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, list):
+            return ""
+        parts: list[str] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "")
+            if item_type in {"text", "output_text"} and isinstance(item.get("text"), str):
+                parts.append(str(item["text"]))
+        return "\n".join(part for part in parts if part)
 
 
 class SpeechBackend:
@@ -625,11 +720,12 @@ class RobotCanvas(Gtk.DrawingArea):
         text(ctx, "PROMPT", 12, 37, MUTED_TEXT, 8, True)
         fill(ctx, 11, 42, 298, 47, ICON_WELL)
         stroke(ctx, 11, 42, 298, 47, ACCENT_ORANGE)
-        lines = wrap_text(state.prompt or "Type text, or press R to record voice.", 43, 4)
+        shown_prompt = state.prompt + self.window.im_preedit
+        lines = wrap_text(shown_prompt or "Type text, or press R to record voice.", 43, 4)
         for i, line_value in enumerate(lines):
-            text(ctx, ("> " if i == 0 else "  ") + line_value, 17, 56 + i * 10, INK_BLACK if state.prompt else MUTED_TEXT, 8)
-        if state.prompt:
-            text(ctx, "_", 21 + min(len(state.prompt), 41) * 5, 56 + (len(lines) - 1) * 10, ACCENT_ORANGE, 8, True)
+            text(ctx, ("> " if i == 0 else "  ") + line_value, 17, 56 + i * 10, INK_BLACK if shown_prompt else MUTED_TEXT, 8)
+        if shown_prompt:
+            text(ctx, "_", 21 + min(len(shown_prompt), 41) * 5, 56 + (len(lines) - 1) * 10, ACCENT_ORANGE, 8, True)
 
         tools = ",".join(MODE_TOOLS[state.robot_mode])
         text(ctx, "PI AGENT", 12, 103, MUTED_TEXT, 8, True)
@@ -654,10 +750,16 @@ class RobotCanvas(Gtk.DrawingArea):
         text(ctx, f"RUNNING {elapsed}s", 12, 39, ACCENT_ORANGE, 8, True)
         fill(ctx, 11, 45, 298, 86, ICON_WELL)
         stroke(ctx, 11, 45, 298, 86)
-        visible = state.events[-7:]
-        for i, event in enumerate(visible):
-            fg = WARN_RED if event.kind == "error" else MUTED_TEXT if event.kind in {"status", "note"} else INK_BLACK
-            text(ctx, fit_text(event.text, 45), 17, 59 + i * 10, fg, 8)
+        last_status = next((event.text for event in reversed(state.events) if event.kind == "status"), "work")
+        preview = clean_agent_text(state.last_message)
+        text(ctx, fit_text(last_status.upper(), 34), 17, 60, ACCENT_ORANGE, 8, True)
+        text(ctx, "The agent is working.", 17, 76, MUTED_TEXT, 8)
+        text(ctx, "Waiting for final answer.", 17, 89, MUTED_TEXT, 8)
+        if preview:
+            text(ctx, "Answer preview", 17, 108, OK_GREEN, 8, True)
+            text(ctx, fit_text(preview.replace("\n", " "), 45), 17, 121, INK_BLACK, 8)
+        else:
+            text(ctx, "Final answer will appear here.", 17, 121, MUTED_TEXT, 8)
 
     def draw_result(self, ctx: cairo.Context) -> None:
         state = self.window.state
@@ -708,7 +810,8 @@ class RobotCanvas(Gtk.DrawingArea):
         text(ctx, fit_text(label, 28), 12, 39, MUTED_TEXT, 8, True)
         fill(ctx, 11, 45, 298, 48, ICON_WELL)
         stroke(ctx, 11, 45, 298, 48, ACCENT_ORANGE)
-        for i, line_value in enumerate(wrap_text(self.window.state.edit_value or "Type value.", 43, 4)):
+        shown_value = self.window.state.edit_value + self.window.im_preedit
+        for i, line_value in enumerate(wrap_text(shown_value or "Type value.", 43, 4)):
             text(ctx, ("> " if i == 0 else "  ") + line_value, 17, 59 + i * 10, INK_BLACK, 8)
         text(ctx, "ENTER save", 17, 119, OK_GREEN, 8, True)
         text(ctx, "C cancel", 122, 119, MUTED_TEXT, 8)
@@ -763,17 +866,78 @@ class RobotWindow(Gtk.ApplicationWindow):
         self.speech = SpeechBackend(self.config)
         self.event_queue: queue.Queue[AgentEvent] = queue.Queue()
         self.worker: threading.Thread | None = None
+        self.timeout_id = 0
+        self.shutting_down = False
         self.canvas = RobotCanvas(self)
+        self.im_preedit = ""
+        self.ime = InputMethodBridge(
+            self.canvas,
+            self.ime_text,
+            self.ime_cursor,
+            self.on_ime_commit,
+            self.on_ime_preedit,
+        )
         self.set_default_size(WIDTH, HEIGHT)
         self.set_size_request(WIDTH, HEIGHT)
         self.set_resizable(False)
         self.set_decorated(False)
         self.set_child(self.canvas)
+        self.connect("close-request", self.on_close_request)
 
         controller = Gtk.EventControllerKey()
         controller.connect("key-pressed", self.on_key)
         self.add_controller(controller)
-        GLib.timeout_add(120, self.drain_events)
+        self.timeout_id = GLib.timeout_add(120, self.drain_events)
+
+    def on_close_request(self, *_args) -> bool:
+        self.shutdown()
+        return True
+
+    def shutdown(self) -> None:
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        if self.timeout_id:
+            GLib.source_remove(self.timeout_id)
+            self.timeout_id = 0
+        self.agent.cancel()
+        self.ime.focus_out()
+        app = self.get_application()
+        if app is not None:
+            app.quit()
+
+    def on_ime_commit(self, text_value: str) -> None:
+        if not text_value:
+            return
+        if self.state.mode == "compose":
+            self.state.prompt += text_value
+        elif self.state.mode == "edit_config":
+            self.state.edit_value += text_value
+        else:
+            return
+        self.im_preedit = ""
+        self.ime.update()
+        self.canvas.queue_draw()
+
+    def on_ime_preedit(self, preedit: str) -> None:
+        self.im_preedit = preedit
+        self.canvas.queue_draw()
+
+    def ime_text(self) -> str:
+        if self.state.mode == "compose":
+            return self.state.prompt
+        if self.state.mode == "edit_config":
+            return self.state.edit_value
+        return ""
+
+    def ime_cursor(self) -> ImeCursor:
+        text_value = self.ime_text()
+        x = 21 + min(len(text_value), 41) * 5
+        if self.state.mode == "edit_config":
+            y = 55 + max(0, len(wrap_text(text_value or " ", 43, 4)) - 1) * 10
+        else:
+            y = 52 + max(0, len(wrap_text(text_value or " ", 43, 4)) - 1) * 10
+        return ImeCursor(x=x, y=y)
 
     def settings_items(self) -> list["SettingsItem"]:
         mode_values = list(MODE_ORDER)
@@ -803,10 +967,16 @@ class RobotWindow(Gtk.ApplicationWindow):
             return None
         return items[min(self.state.settings_index, len(items) - 1)]
 
-    def on_key(self, _controller, keyval: int, _keycode: int, state_flags: int) -> bool:
+    def on_key(self, controller, keyval: int, _keycode: int, state_flags: int) -> bool:
         ctrl = bool(state_flags & Gdk.ModifierType.CONTROL_MASK)
         if ctrl and keyval in (Gdk.KEY_q, Gdk.KEY_Q):
+            self.shutdown()
             self.close()
+            return True
+
+        if self.state.mode in {"compose", "edit_config"} and self.ime.filter_controller_key(controller):
+            return True
+        if ctrl and keyval == Gdk.KEY_space:
             return True
 
         if self.state.mode == "settings":
@@ -838,10 +1008,12 @@ class RobotWindow(Gtk.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_c, Gdk.KEY_C):
             self.state.prompt = ""
+            self.ime.reset()
             self.canvas.queue_draw()
             return True
         if keyval in (Gdk.KEY_BackSpace, Gdk.KEY_Delete):
             self.state.prompt = self.state.prompt[:-1]
+            self.ime.update()
             self.canvas.queue_draw()
             return True
         if keyval == Gdk.KEY_space:
@@ -890,10 +1062,12 @@ class RobotWindow(Gtk.ApplicationWindow):
             return True
         if keyval in (Gdk.KEY_c, Gdk.KEY_C, Gdk.KEY_Escape):
             self.state.mode = "settings"
+            self.ime.reset()
             self.canvas.queue_draw()
             return True
         if keyval in (Gdk.KEY_BackSpace, Gdk.KEY_Delete):
             self.state.edit_value = self.state.edit_value[:-1]
+            self.ime.update()
             self.canvas.queue_draw()
             return True
         if keyval == Gdk.KEY_space:
@@ -952,7 +1126,9 @@ class RobotWindow(Gtk.ApplicationWindow):
 
     def on_result_key(self, keyval: int) -> bool:
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
-            self.state = RobotState(robot_mode=self.state.robot_mode, cwd=self.state.cwd)
+            self.state.mode = "compose"
+            self.state.prompt = ""
+            self.state.scroll = max(0, len(self.state.result_lines) - RESULT_VISIBLE_LINES)
         elif keyval in (Gdk.KEY_b, Gdk.KEY_B, Gdk.KEY_BackSpace, Gdk.KEY_Escape, Gdk.KEY_c, Gdk.KEY_C):
             self.state.mode = "compose"
         elif keyval == Gdk.KEY_Up:
@@ -996,6 +1172,8 @@ class RobotWindow(Gtk.ApplicationWindow):
         self.state.started_at = time.time()
         self.state.events = [AgentEvent("prompt", prompt)]
         self.state.result_lines = []
+        self.state.last_message = ""
+        self.state.scroll = 0
         self.state.error = ""
         self.canvas.queue_draw()
 
@@ -1006,6 +1184,8 @@ class RobotWindow(Gtk.ApplicationWindow):
         self.worker.start()
 
     def drain_events(self) -> bool:
+        if self.shutting_down:
+            return False
         changed = False
         while True:
             try:
@@ -1021,16 +1201,17 @@ class RobotWindow(Gtk.ApplicationWindow):
                 elif self.state.mode != "error":
                     self.state.mode = "result"
                     self.state.status = "DONE"
+                    self.add_conversation_turn()
                     self.state.result_lines = self.result_lines()
+                    self.state.scroll = max(0, len(self.state.result_lines) - RESULT_VISIBLE_LINES)
             elif event.kind == "transcript":
                 self.state.transcript = event.text
                 self.state.events.append(AgentEvent("transcript", event.text))
             elif event.kind == "final":
                 self.state.last_message = event.text
-                self.state.events.append(event)
+                self.state.events.append(AgentEvent("status", "answer ready"))
             elif event.kind == "delta":
                 self.state.last_message += event.text
-                self.state.events.append(AgentEvent("final", self.state.last_message))
             elif event.kind == "error":
                 self.set_error(event.text, queue_draw=False)
             else:
@@ -1041,40 +1222,41 @@ class RobotWindow(Gtk.ApplicationWindow):
             self.canvas.queue_draw()
         return True
 
+    def add_conversation_turn(self) -> None:
+        prompt = clean_agent_text(self.state.prompt)
+        response = clean_agent_text(self.state.last_message)
+        if not prompt and not response:
+            return
+        if self.state.turns and self.state.turns[-1].prompt == prompt and self.state.turns[-1].response == response:
+            return
+        self.state.turns.append(ConversationTurn(prompt=prompt, response=response or "Pi agent finished."))
+        if len(self.state.turns) > 20:
+            self.state.turns = self.state.turns[-20:]
+
     def result_lines(self) -> list[str]:
         lines: list[str] = []
-        prompt = clean_agent_text(self.state.prompt)
-        if prompt:
-            first = True
-            for paragraph in prompt.splitlines():
-                for line_value in wrap_text(paragraph, RESULT_BODY_WIDTH):
-                    lines.append(("YOU " if first else "   ") + line_value)
-                    first = False
-            lines.append("")
-        message = clean_agent_text(self.state.last_message)
-        if message:
-            first = True
-            for paragraph in message.splitlines():
-                for line_value in wrap_text(paragraph, RESULT_BODY_WIDTH):
-                    lines.append(("PI " if first else "  ") + line_value)
-                    first = False
-            return lines[-120:] or ["PI Pi agent finished."]
-        text_events = [
-            clean_agent_text(event.text)
-            for event in self.state.events
-            if event.kind in {"final", "delta", "log", "note", "tool"} and event.text
-        ]
-        text_events = [event_text for event_text in text_events if event_text]
-        if not text_events:
-            lines.append("PI Pi agent finished.")
-            return lines[-120:]
-        first = True
-        for event_text in text_events[-20:]:
-            for paragraph in event_text.splitlines():
-                for line_value in wrap_text(paragraph, RESULT_BODY_WIDTH):
-                    lines.append(("PI " if first else "  ") + line_value)
-                    first = False
-        return lines[-120:] or ["PI Pi agent finished."]
+        turns = self.state.turns or [ConversationTurn(clean_agent_text(self.state.prompt), clean_agent_text(self.state.last_message))]
+        for turn_index, turn in enumerate(turns):
+            prompt = clean_agent_text(turn.prompt)
+            if prompt:
+                first = True
+                for paragraph in prompt.splitlines():
+                    for line_value in wrap_text(paragraph, RESULT_BODY_WIDTH):
+                        lines.append(("YOU " if first else "   ") + line_value)
+                        first = False
+            message = clean_agent_text(turn.response)
+            if message:
+                first = True
+                for paragraph in message.splitlines():
+                    for line_value in wrap_text(paragraph, RESULT_BODY_WIDTH):
+                        lines.append(("PI " if first else "  ") + line_value)
+                        first = False
+            if turn_index != len(turns) - 1:
+                lines.append("")
+        if lines:
+            return lines[-240:]
+        lines.append("PI Pi agent finished.")
+        return lines[-240:]
 
     def set_error(self, message: str, queue_draw: bool = True) -> None:
         self.state.mode = "error"
@@ -1086,7 +1268,7 @@ class RobotWindow(Gtk.ApplicationWindow):
 
 class RobotApplication(Gtk.Application):
     def __init__(self) -> None:
-        super().__init__(application_id="dev.cardputerzero.defaultapps.robot")
+        super().__init__(application_id=APP_ID)
         self.window: RobotWindow | None = None
 
     def do_activate(self) -> None:
@@ -1098,5 +1280,4 @@ class RobotApplication(Gtk.Application):
 
 
 def run(argv: list[str] | None = None) -> int:
-    app = RobotApplication()
-    return app.run(argv or [])
+    return run_single_instance(APP_ID, lambda: RobotApplication().run(argv or []))

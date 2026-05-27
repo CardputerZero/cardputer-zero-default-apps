@@ -6,5 +6,10 @@ if [ -r "$env_file" ]; then
   set +a
 fi
 
+export XMODIFIERS="${XMODIFIERS:-@im=fcitx}"
+export GTK_IM_MODULE="${GTK_IM_MODULE:-fcitx}"
+export QT_IM_MODULE="${QT_IM_MODULE:-fcitx}"
+export SDL_IM_MODULE="${SDL_IM_MODULE:-fcitx}"
+
 log_dir="${XDG_RUNTIME_DIR:-/tmp}"
 exec python3 -m czero_apps.main robot "$@" 2>>"$log_dir/zero-robot-crash.log"

@@ -227,8 +227,11 @@ terminal window.
 
 `zero-robot` is a small-screen Pi agent frontend. It connects keyboard text
 input and optional speech-to-text transcripts to `pi --mode rpc`, then renders
-agent status, tool activity, output, and errors in a 320x170 Cardputer Zero
-interface.
+compact agent status, output, and errors in a 320x170 Cardputer Zero
+interface. Thinking and tool streams are intentionally collapsed into short
+status labels so the final response remains readable on the small display.
+
+![Robot](docs/assets/screenshots/robot-current.png)
 
 Robot does not implement a new agent runtime or a new permission model. Its
 tools selector maps directly to Pi tool allowlists:
@@ -352,3 +355,39 @@ Syntax check:
 ```sh
 python3 -m compileall src
 ```
+
+Build a device deployment package locally with Docker:
+
+```sh
+sh scripts/docker-build-arm64.sh
+```
+
+The Docker build does not install Robot runtime dependencies and does not build
+on the target device. It validates Python syntax and writes:
+
+```text
+.docker-out/cardputer-zero-default-apps.tar.gz
+```
+
+Deploy that archive to the device, unpack it, and install with:
+
+```sh
+SKIP_ROBOT_RUNTIME=1 sh install.sh
+```
+
+For the current multi-repository device fix bundle, build all three local
+Docker outputs first:
+
+```sh
+sh scripts/build-device-fixes.sh
+```
+
+Then stage the built artifacts to a device:
+
+```sh
+cd ../cardputer-zero-default-apps
+sh scripts/stage-device-fixes.sh pi@192.168.50.35
+```
+
+This only uploads artifacts and writes `/tmp/czero-deploy-fixes/install-as-root.sh`.
+The device still needs root privileges to install into `/usr` and `/opt`.

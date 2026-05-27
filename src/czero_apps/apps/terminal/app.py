@@ -21,8 +21,12 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
+gi.require_version("PangoCairo", "1.0")
 
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+
+from czero_apps.ui.ime import ImeCursor, InputMethodBridge
+from czero_apps.system.single_instance import run_single_instance
 
 APP_ID = "dev.cardputerzero.defaultapps.terminal"
 GLib.set_prgname(APP_ID)
@@ -166,6 +170,18 @@ def color(ctx, value: str) -> None:
     ctx.set_source_rgb(*hex_to_rgb(value))
 
 
+def needs_shaped_text(value: str) -> bool:
+    return any(ord(ch) > 127 for ch in value)
+
+
+def pango_font(size: int, bold: bool = False) -> Pango.FontDescription:
+    desc = Pango.FontDescription()
+    desc.set_family("monospace, Noto Sans CJK SC, WenQuanYi Micro Hei, Sans")
+    desc.set_size(size * Pango.SCALE)
+    desc.set_weight(Pango.Weight.BOLD if bold else Pango.Weight.NORMAL)
+    return desc
+
+
 def fill(ctx, x: int, y: int, w: int, h: int, value: str) -> None:
     color(ctx, value)
     ctx.rectangle(x, y, w, h)
@@ -189,6 +205,13 @@ def line(ctx, x1: int, y1: int, x2: int, y2: int, value: str = LINE_BLACK) -> No
 
 def draw_text(ctx, value: str, x: int, y: int, fg: str = INK_BLACK, size: int = 8, bold: bool = False) -> None:
     color(ctx, fg)
+    if needs_shaped_text(value):
+        layout = PangoCairo.create_layout(ctx)
+        layout.set_font_description(pango_font(size, bold))
+        layout.set_text(value, -1)
+        ctx.move_to(x, y - size)
+        PangoCairo.show_layout(ctx, layout)
+        return
     ctx.select_font_face("monospace", 0, 1 if bold else 0)
     ctx.set_font_size(size)
     ctx.move_to(x, y)
@@ -846,6 +869,8 @@ class TerminalCanvas(Gtk.DrawingArea):
             cx = base_x + tab.screen.cursor_col * CELL_W
             cy = base_y + tab.screen.cursor_row * CELL_H
             fill(ctx, cx, cy + CELL_H - 2, CELL_W, 2, ACCENT_ORANGE)
+            if self.window.im_preedit and not self.window.rename_mode:
+                draw_text(ctx, fit_text(self.window.im_preedit, 20), cx, cy + 8, ACCENT_ORANGE, FONT_SIZE, True)
         if self.window.scroll_offset:
             draw_text(ctx, f"SCROLL {self.window.scroll_offset}", TERM_X + TERM_W - 70, TERM_Y + 12, TERM_YELLOW, 8, True)
         if tab.exited:
@@ -917,7 +942,7 @@ class TerminalCanvas(Gtk.DrawingArea):
         draw_text(ctx, "Rename Tab", x + 9, y + 14, ACCENT_ORANGE, 9, True)
         fill(ctx, x + 9, y + 24, w - 18, 20, ICON_WELL)
         stroke(ctx, x + 9, y + 24, w - 18, 20, ACCENT_ORANGE)
-        draw_text(ctx, fit_text(self.window.rename_text, 26), x + 15, y + 38, INK_BLACK, 9)
+        draw_text(ctx, fit_text(self.window.rename_text + self.window.im_preedit, 26), x + 15, y + 38, INK_BLACK, 9)
         draw_text(ctx, "Enter Apply   Esc Cancel", x + 9, y + 53, MUTED_TEXT, 8)
 
     def draw_confirm(self, ctx) -> None:
@@ -974,6 +999,7 @@ class TerminalWindow(Gtk.ApplicationWindow):
         self.confirm_title = ""
         self.confirm_message = ""
         self.confirm_action = ""
+        self.im_preedit = ""
 
         self.set_default_size(WIDTH, HEIGHT)
         self.set_size_request(WIDTH, HEIGHT)
@@ -988,9 +1014,47 @@ class TerminalWindow(Gtk.ApplicationWindow):
         self.canvas = TerminalCanvas(self)
         self.add(self.canvas)
         self.canvas.show()
+        self.ime = InputMethodBridge(
+            self.canvas,
+            self.ime_text,
+            self.ime_cursor,
+            self.on_ime_commit,
+            self.on_ime_preedit,
+        )
         self.add_terminal_accelerators()
         self.new_tab()
         GLib.timeout_add(1000, self.refresh_tab_titles)
+
+    def ime_text(self) -> str:
+        if self.rename_mode:
+            return self.rename_text
+        return ""
+
+    def ime_cursor(self) -> ImeCursor:
+        if self.rename_mode:
+            x = 59 + min(len(self.rename_text), 26) * CELL_W
+            return ImeCursor(x=x, y=68, height=12)
+        tab = self.active_tab()
+        if tab and self.scroll_offset == 0:
+            x = TERM_X + TERM_PAD_X + tab.screen.cursor_col * CELL_W
+            y = TERM_Y + TERM_PAD_Y + tab.screen.cursor_row * CELL_H
+            return ImeCursor(x=x, y=y, width=CELL_W, height=CELL_H)
+        return ImeCursor(x=TERM_X + TERM_PAD_X, y=TERM_Y + TERM_PAD_Y, width=CELL_W, height=CELL_H)
+
+    def on_ime_commit(self, text_value: str) -> None:
+        if not text_value:
+            return
+        if self.rename_mode:
+            self.rename_text = (self.rename_text + text_value)[:32]
+            self.ime.update()
+            self.canvas.queue_draw()
+            return
+        self.scroll_offset = 0
+        self.feed_active(text_value.encode("utf-8"))
+
+    def on_ime_preedit(self, preedit: str) -> None:
+        self.im_preedit = preedit
+        self.canvas.queue_draw()
 
     def add_terminal_accelerators(self) -> None:
         accel_group = Gtk.AccelGroup()
@@ -1245,19 +1309,23 @@ class TerminalWindow(Gtk.ApplicationWindow):
 
     def handle_rename_key(self, keyval: int, state: Gdk.ModifierType) -> bool:
         if keyval == Gdk.KEY_Escape:
+            self.ime.reset()
             self.close_overlay_modes()
         elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             tab = self.active_tab()
             if tab and self.rename_text.strip():
                 tab.custom_title = self.rename_text.strip()
                 tab.title = tab.custom_title
+            self.ime.reset()
             self.close_overlay_modes()
         elif keyval == Gdk.KEY_BackSpace:
             self.rename_text = self.rename_text[:-1]
+            self.ime.update()
         else:
             char = Gdk.keyval_to_unicode(keyval)
             if char and 32 <= char <= 126 and not (state & Gdk.ModifierType.CONTROL_MASK):
                 self.rename_text = (self.rename_text + chr(char))[:32]
+                self.ime.update()
         self.canvas.queue_draw()
         return True
 
@@ -1311,6 +1379,8 @@ class TerminalWindow(Gtk.ApplicationWindow):
         alt = bool(state & Gdk.ModifierType.MOD1_MASK)
 
         if self.rename_mode:
+            if self.ime.filter_key_event(event):
+                return True
             return self.handle_rename_key(event.keyval, state)
         if self.menu_open:
             return self.handle_menu_key(event.keyval)
@@ -1346,6 +1416,9 @@ class TerminalWindow(Gtk.ApplicationWindow):
         if shift and event.keyval in (Gdk.KEY_Down, Gdk.KEY_Page_Down):
             self.scroll_history(-1 if event.keyval == Gdk.KEY_Down else -ROWS)
             return True
+        if not ctrl and not alt and key_is_text_input(event) and self.ime.filter_key_event(event):
+            return True
+
         data = key_to_bytes(event)
         if data:
             self.scroll_offset = 0
@@ -1408,6 +1481,29 @@ def key_to_bytes(event) -> bytes | None:
     return None
 
 
+def key_is_text_input(event) -> bool:
+    if event.keyval in {
+        Gdk.KEY_Return,
+        Gdk.KEY_KP_Enter,
+        Gdk.KEY_BackSpace,
+        Gdk.KEY_Tab,
+        Gdk.KEY_Escape,
+        Gdk.KEY_Up,
+        Gdk.KEY_Down,
+        Gdk.KEY_Right,
+        Gdk.KEY_Left,
+        Gdk.KEY_Home,
+        Gdk.KEY_End,
+        Gdk.KEY_Insert,
+        Gdk.KEY_Delete,
+        Gdk.KEY_Page_Up,
+        Gdk.KEY_Page_Down,
+    }:
+        return False
+    char = Gdk.keyval_to_unicode(event.keyval)
+    return bool(char and char >= 32)
+
+
 class TerminalApplication(Gtk.Application):
     def __init__(self) -> None:
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
@@ -1429,5 +1525,4 @@ class TerminalApplication(Gtk.Application):
 
 
 def run(argv: list[str] | None = None) -> int:
-    app = TerminalApplication()
-    return app.run(argv or [])
+    return run_single_instance(APP_ID, lambda: TerminalApplication().run(argv or []))

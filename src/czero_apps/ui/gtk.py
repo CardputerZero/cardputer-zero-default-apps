@@ -12,7 +12,8 @@ os.environ.setdefault("GTK_A11Y", "none")
 
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk", "4.0")
+gi.require_version("PangoCairo", "1.0")
 
-from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
-__all__ = ["Gdk", "GLib", "Gtk", "Pango"]
+__all__ = ["Gdk", "GLib", "Gtk", "Pango", "PangoCairo"]

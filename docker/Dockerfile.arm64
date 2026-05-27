@@ -1,0 +1,23 @@
+FROM debian:bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN printf 'Acquire::Retries "5";\nAcquire::http::Timeout "30";\n' > /etc/apt/apt.conf.d/80-zero-build-retries \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+        tar \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . /src
+
+RUN python3 -m compileall -q /src/src \
+    && mkdir -p /out \
+    && tar -C /src \
+        --exclude='.git' \
+        --exclude='.docker-out' \
+        --exclude='__pycache__' \
+        --exclude='*.pyc' \
+        -czf /out/cardputer-zero-default-apps.tar.gz \
+        applications bin icons install.sh src
