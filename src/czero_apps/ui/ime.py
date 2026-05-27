@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -30,6 +31,7 @@ class InputMethodBridge:
         self.preedit_handler = preedit_handler
         self.preedit = ""
         self.enabled = False
+        self.attach_client_target = os.environ.get("CZERO_IME_ATTACH_CLIENT_TARGET", "1") != "0"
         self.context = Gtk.IMMulticontext.new()
         self.context.set_use_preedit(True)
         self._set_client_target()
@@ -85,6 +87,8 @@ class InputMethodBridge:
         return False
 
     def _set_client_target(self) -> None:
+        if not self.attach_client_target:
+            return
         if hasattr(self.context, "set_client_widget"):
             self.context.set_client_widget(self.widget)
             return

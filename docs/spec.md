@@ -43,6 +43,18 @@ Pi agent tools profile, working-directory, prompt, output, tool activity, and
 errors in a 320x170 interface. Execution and authorization semantics remain
 owned by Pi, the current Linux user, and standard Linux authorization systems.
 Any Robot UI mode must map directly to Pi tool allowlists.
+FULL mode includes Pi's `bash` tool so Pi can execute normal system commands
+as the current Linux user.
+
+Robot may pass a presentation-only response contract to Pi via Pi's system
+prompt configuration so Pi answers are suitable for the 320x170 screen. This
+contract must not change the user task, working directory, tools profile,
+execution semantics, or authorization boundary.
+
+Robot may surface Pi RPC extension UI requests such as confirmation prompts,
+text input, selectors, and editor input. These prompts are user interaction
+adapters only; they must not bypass sudo, polkit, or any other Linux
+authorization system.
 
 Speech-to-text is an input adapter only. Voice transcripts must be visible to
 the user before they are sent to Pi.

@@ -41,9 +41,23 @@ SOFT_LINE = "#DCD5C3"
 
 RESULT_LINE_WIDTH = 59
 RESULT_BODY_WIDTH = 55
-RESULT_VISIBLE_LINES = 15
+RESULT_VISIBLE_LINES = 12
+RESULT_TEXT_SIZE = 8
+RESULT_LINE_STEP = 9
+RESULT_FIRST_LINE_Y = 43
+SMALL_SCREEN_RESPONSE_CONTRACT = """You are replying through Zero Robot on a 320x170 handheld screen.
+Follow this output contract:
+- Reply in the same language as the user's request.
+- Answer in plain text.
+- Put the direct answer first.
+- Keep replies short enough for a tiny screen.
+- Use at most 3 short bullets when useful.
+- Avoid Markdown tables, deep nesting, headings, and long code blocks.
+- If more detail is needed, give a brief summary and say what to ask next.
+If a command needs user confirmation or a password, ask for it before retrying.
+This contract changes only presentation, not the user's task, tools, or permissions."""
 
-Mode = Literal["compose", "confirm_transcript", "running", "result", "error", "settings", "edit_config"]
+Mode = Literal["compose", "confirm_transcript", "running", "result", "error", "settings", "edit_config", "agent_prompt"]
 RobotMode = Literal["SAFE", "EDIT", "FULL"]
 
 MODE_ORDER: tuple[RobotMode, ...] = ("SAFE", "EDIT", "FULL")
@@ -54,7 +68,7 @@ MODE_TOOLS: dict[RobotMode, tuple[str, ...]] = {
 }
 
 DEFAULT_CONFIG = {
-    "mode": "EDIT",
+    "mode": "FULL",
     "cwd": "home",
     "pi_bin": "pi",
     "provider": "",
@@ -193,9 +207,10 @@ def text(
     fg: str = INK_BLACK,
     size: int = 8,
     bold: bool = False,
+    use_pango: bool = False,
 ) -> None:
     color(ctx, fg)
-    if needs_shaped_text(value):
+    if use_pango or needs_shaped_text(value):
         layout = PangoCairo.create_layout(ctx)
         layout.set_font_description(pango_font(size, bold))
         layout.set_text(value, -1)
@@ -246,6 +261,16 @@ class ConversationTurn:
     response: str
 
 
+@dataclass
+class AgentUiRequest:
+    id: str
+    method: str
+    title: str = ""
+    message: str = ""
+    placeholder: str = ""
+    options: list[str] = field(default_factory=list)
+
+
 @dataclass(frozen=True)
 class SettingsItem:
     key: str
@@ -272,6 +297,9 @@ class RobotState:
     settings_index: int = 0
     edit_key: str = ""
     edit_value: str = ""
+    agent_ui: AgentUiRequest | None = None
+    agent_ui_value: str = ""
+    agent_ui_selected: int = 0
     started_at: float = 0.0
 
 
@@ -311,10 +339,28 @@ def result_position(scroll: int, total: int) -> str:
     return f"{first:02d}-{last:02d}/{total:02d}"
 
 
+def agent_ui_is_secret(request: AgentUiRequest) -> bool:
+    value = f"{request.title} {request.message} {request.placeholder}".lower()
+    return any(word in value for word in ("password", "passphrase", "sudo", "secret", "token", "api key"))
+
+
+def agent_ui_prompt(request: AgentUiRequest) -> str:
+    if request.message:
+        return request.message
+    if request.placeholder:
+        return request.placeholder
+    if request.method == "confirm":
+        return "Confirm this Pi request."
+    if request.method == "select":
+        return "Choose an option."
+    return "Enter a value for Pi."
+
+
 class PiBackend:
     def __init__(self, config: dict) -> None:
         self.config = config
         self.process: subprocess.Popen[str] | None = None
+        self.pending_ui: dict[str, subprocess.Popen[str]] = {}
 
     def resolve_pi_bin(self) -> str | None:
         configured = str(self.config.get("pi_bin", "pi")).strip() or "pi"
@@ -345,6 +391,8 @@ class PiBackend:
             "rpc",
             "--tools",
             ",".join(MODE_TOOLS[robot_mode]),
+            "--append-system-prompt",
+            SMALL_SCREEN_RESPONSE_CONTRACT,
         ]
         provider = str(self.config.get("provider", "")).strip()
         model = str(self.config.get("model", "")).strip()
@@ -406,7 +454,7 @@ class PiBackend:
             for line_value in proc.stdout:
                 kind = self._parse_jsonl(line_value, events)
                 if line_value.strip():
-                    self._auto_handle_rpc_request(line_value, proc)
+                    self._handle_rpc_request(line_value, proc, events)
                     if kind in {"agent_end", "done"}:
                         completed_normally = True
                         break
@@ -425,6 +473,7 @@ class PiBackend:
                 events.put(AgentEvent("note", stderr.strip()))
         finally:
             self.process = None
+            self.pending_ui.clear()
         events.put(AgentEvent("done", ""))
 
     def cancel(self) -> None:
@@ -442,24 +491,43 @@ class PiBackend:
         except OSError:
             pass
 
-    def _auto_handle_rpc_request(self, line_value: str, proc: subprocess.Popen[str]) -> None:
+    def _write_ui_response(self, proc: subprocess.Popen[str], request_id: str, response: dict) -> None:
+        if proc.stdin is None:
+            return
+        payload = {"type": "extension_ui_response", "id": request_id}
+        payload.update(response)
+        try:
+            proc.stdin.write(json.dumps(payload) + "\n")
+            proc.stdin.flush()
+        except OSError:
+            return
+
+    def respond_to_ui_request(self, request_id: str, response: dict) -> None:
+        proc = self.pending_ui.pop(request_id, None)
+        if proc is None:
+            return
+        self._write_ui_response(proc, request_id, response)
+
+    def _handle_rpc_request(self, line_value: str, proc: subprocess.Popen[str], events: "queue.Queue[AgentEvent]") -> None:
         try:
             payload = json.loads(line_value)
         except json.JSONDecodeError:
             return
         if payload.get("type") != "extension_ui_request":
             return
-        if payload.get("method") not in {"select", "confirm", "input", "editor"}:
+        method = str(payload.get("method") or "")
+        if method == "notify":
+            return
+        if method in {"setStatus", "setWidget", "setTitle", "set_editor_text"}:
             return
         request_id = payload.get("id")
         if not request_id or proc.stdin is None:
             return
-        response = {"type": "extension_ui_response", "id": request_id, "cancelled": True}
-        try:
-            proc.stdin.write(json.dumps(response) + "\n")
-            proc.stdin.flush()
-        except OSError:
+        if method not in {"select", "confirm", "input", "editor"}:
+            self._write_ui_response(proc, str(request_id), {"cancelled": True})
             return
+        self.pending_ui[str(request_id)] = proc
+        events.put(AgentEvent("ui_request", json.dumps(payload)))
 
     def _parse_jsonl(self, line_value: str, events: "queue.Queue[AgentEvent]") -> str:
         raw = line_value.strip()
@@ -701,6 +769,8 @@ class RobotCanvas(Gtk.DrawingArea):
             self.draw_transcript(ctx)
         elif state.mode == "running":
             self.draw_running(ctx)
+        elif state.mode == "agent_prompt":
+            self.draw_agent_prompt(ctx)
         elif state.mode == "result":
             self.draw_result(ctx)
         elif state.mode == "error":
@@ -761,6 +831,38 @@ class RobotCanvas(Gtk.DrawingArea):
         else:
             text(ctx, "Final answer will appear here.", 17, 121, MUTED_TEXT, 8)
 
+    def draw_agent_prompt(self, ctx: cairo.Context) -> None:
+        state = self.window.state
+        request = state.agent_ui
+        if request is None:
+            text(ctx, "PI REQUEST", 12, 39, MUTED_TEXT, 8, True)
+            text(ctx, "Waiting for Pi.", 17, 61, MUTED_TEXT, 8)
+            return
+        title = request.title or request.method.upper()
+        text(ctx, fit_text(title.upper(), 32), 12, 39, ACCENT_ORANGE, 8, True)
+        prompt = agent_ui_prompt(request)
+        fill(ctx, 11, 45, 298, 52, ICON_WELL)
+        stroke(ctx, 11, 45, 298, 52, ACCENT_ORANGE)
+        for i, line_value in enumerate(wrap_text(prompt, 43, 4)):
+            text(ctx, line_value, 17, 59 + i * 10, INK_BLACK, 8)
+        if request.method == "select":
+            options = request.options or ["OK"]
+            selected = max(0, min(state.agent_ui_selected, len(options) - 1))
+            text(ctx, fit_text(options[selected], 39), 17, 115, OK_GREEN, 8, True)
+            if len(options) > 1:
+                text(ctx, f"{selected + 1}/{len(options)}", 256, 115, MUTED_TEXT, 8, True)
+        elif request.method == "confirm":
+            text(ctx, "ENTER confirm", 17, 115, OK_GREEN, 8, True)
+            text(ctx, "C cancel", 166, 115, MUTED_TEXT, 8)
+        else:
+            shown_value = state.agent_ui_value + self.window.im_preedit
+            if agent_ui_is_secret(request) and shown_value:
+                shown_value = "*" * len(shown_value)
+            for i, line_value in enumerate(wrap_text(shown_value or "Type value.", 43, 2)):
+                text(ctx, ("> " if i == 0 else "  ") + line_value, 17, 112 + i * 10, INK_BLACK if shown_value else MUTED_TEXT, 8)
+        text(ctx, "ENT send", 17, 134, OK_GREEN, 8, True)
+        text(ctx, "C cancel", 159, 134, MUTED_TEXT, 8)
+
     def draw_result(self, ctx: cairo.Context) -> None:
         state = self.window.state
         text(ctx, "CONVERSATION", 8, 29, OK_GREEN, 7, True)
@@ -768,17 +870,17 @@ class RobotCanvas(Gtk.DrawingArea):
         line(ctx, 0, 33, WIDTH, 33, SOFT_LINE)
         lines = state.result_lines[state.scroll : state.scroll + RESULT_VISIBLE_LINES]
         for i, line_value in enumerate(lines):
-            y = 42 + i * 7
+            y = RESULT_FIRST_LINE_Y + i * RESULT_LINE_STEP
             if line_value.startswith("YOU "):
-                text(ctx, "YOU", 8, y, ACCENT_ORANGE, 6, True)
-                text(ctx, fit_text(line_value[4:].strip(), RESULT_BODY_WIDTH), 28, y, INK_BLACK, 6)
+                text(ctx, "YOU", 8, y, ACCENT_ORANGE, RESULT_TEXT_SIZE, True, use_pango=True)
+                text(ctx, fit_text(line_value[4:].strip(), RESULT_BODY_WIDTH), 31, y, INK_BLACK, RESULT_TEXT_SIZE, use_pango=True)
             elif line_value.startswith("PI "):
-                text(ctx, "PI", 8, y, OK_GREEN, 6, True)
-                text(ctx, fit_text(line_value[3:].strip(), RESULT_BODY_WIDTH), 28, y, INK_BLACK, 6)
+                text(ctx, "PI", 8, y, OK_GREEN, RESULT_TEXT_SIZE, True, use_pango=True)
+                text(ctx, fit_text(line_value[3:].strip(), RESULT_BODY_WIDTH), 31, y, INK_BLACK, RESULT_TEXT_SIZE, use_pango=True)
             elif not line_value:
-                line(ctx, 8, y - 3, 312, y - 3, SOFT_LINE)
+                line(ctx, 8, y - 4, 312, y - 4, SOFT_LINE)
             else:
-                text(ctx, fit_text(line_value, RESULT_LINE_WIDTH), 28, y, INK_BLACK, 6)
+                text(ctx, fit_text(line_value, RESULT_LINE_WIDTH), 31, y, INK_BLACK, RESULT_TEXT_SIZE, use_pango=True)
 
     def draw_error(self, ctx: cairo.Context) -> None:
         state = self.window.state
@@ -825,6 +927,15 @@ class RobotCanvas(Gtk.DrawingArea):
         fill(ctx, 0, y, WIDTH, BOTTOM_H, ZERO_PAPER)
         line(ctx, 0, y, WIDTH, y)
         state = self.window.state
+        if state.mode == "agent_prompt":
+            draw_key(ctx, 8, y + 3, "ENT", 28)
+            text(ctx, "SEND", 41, y + 13, INK_BLACK, 8, True)
+            if state.agent_ui and state.agent_ui.method == "select":
+                draw_key(ctx, 100, y + 3, "UP", 22)
+                draw_key(ctx, 130, y + 3, "DN", 22)
+            draw_key(ctx, 224, y + 3, "C", 16)
+            text(ctx, "CANCEL", 245, y + 13, MUTED_TEXT, 8)
+            return
         if state.mode == "running":
             draw_key(ctx, 8, y + 3, "C", 16)
             text(ctx, "CANCEL", 29, y + 13, INK_BLACK, 8, True)
@@ -913,6 +1024,11 @@ class RobotWindow(Gtk.ApplicationWindow):
             self.state.prompt += text_value
         elif self.state.mode == "edit_config":
             self.state.edit_value += text_value
+        elif self.state.mode == "agent_prompt":
+            request = self.state.agent_ui
+            if request is None or request.method not in {"input", "editor"}:
+                return
+            self.state.agent_ui_value += text_value
         else:
             return
         self.im_preedit = ""
@@ -928,16 +1044,23 @@ class RobotWindow(Gtk.ApplicationWindow):
             return self.state.prompt
         if self.state.mode == "edit_config":
             return self.state.edit_value
+        if self.agent_prompt_accepts_text():
+            return self.state.agent_ui_value
         return ""
 
     def ime_cursor(self) -> ImeCursor:
         text_value = self.ime_text()
         x = 21 + min(len(text_value), 41) * 5
-        if self.state.mode == "edit_config":
+        if self.state.mode == "agent_prompt":
+            y = 108 + max(0, len(wrap_text(text_value or " ", 43, 2)) - 1) * 10
+        elif self.state.mode == "edit_config":
             y = 55 + max(0, len(wrap_text(text_value or " ", 43, 4)) - 1) * 10
         else:
             y = 52 + max(0, len(wrap_text(text_value or " ", 43, 4)) - 1) * 10
         return ImeCursor(x=x, y=y)
+
+    def agent_prompt_accepts_text(self) -> bool:
+        return self.state.mode == "agent_prompt" and self.state.agent_ui is not None and self.state.agent_ui.method in {"input", "editor"}
 
     def settings_items(self) -> list["SettingsItem"]:
         mode_values = list(MODE_ORDER)
@@ -974,7 +1097,7 @@ class RobotWindow(Gtk.ApplicationWindow):
             self.close()
             return True
 
-        if self.state.mode in {"compose", "edit_config"} and self.ime.filter_controller_key(controller):
+        if (self.state.mode in {"compose", "edit_config"} or self.agent_prompt_accepts_text()) and self.ime.filter_controller_key(controller):
             return True
         if ctrl and keyval == Gdk.KEY_space:
             return True
@@ -983,6 +1106,8 @@ class RobotWindow(Gtk.ApplicationWindow):
             return self.on_settings_key(keyval)
         if self.state.mode == "edit_config":
             return self.on_edit_config_key(keyval)
+        if self.state.mode == "agent_prompt":
+            return self.on_agent_prompt_key(keyval)
         if self.state.mode == "running":
             if keyval in (Gdk.KEY_c, Gdk.KEY_C):
                 self.agent.cancel()
@@ -1080,6 +1205,67 @@ class RobotWindow(Gtk.ApplicationWindow):
             self.canvas.queue_draw()
             return True
         return False
+
+    def on_agent_prompt_key(self, keyval: int) -> bool:
+        request = self.state.agent_ui
+        if request is None:
+            self.state.mode = "running"
+            self.canvas.queue_draw()
+            return True
+        if keyval in (Gdk.KEY_c, Gdk.KEY_C, Gdk.KEY_Escape):
+            self.agent.respond_to_ui_request(request.id, {"cancelled": True})
+            self.clear_agent_ui()
+            return True
+        if request.method == "select":
+            count = max(1, len(request.options))
+            if keyval in (Gdk.KEY_Up, Gdk.KEY_Left):
+                self.state.agent_ui_selected = (self.state.agent_ui_selected - 1) % count
+            elif keyval in (Gdk.KEY_Down, Gdk.KEY_Right, Gdk.KEY_space):
+                self.state.agent_ui_selected = (self.state.agent_ui_selected + 1) % count
+            elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+                options = request.options or [""]
+                selected = max(0, min(self.state.agent_ui_selected, len(options) - 1))
+                self.agent.respond_to_ui_request(request.id, {"value": options[selected]})
+                self.clear_agent_ui()
+            else:
+                return False
+            self.canvas.queue_draw()
+            return True
+        if request.method == "confirm":
+            if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                self.agent.respond_to_ui_request(request.id, {"confirmed": True})
+                self.clear_agent_ui()
+                return True
+            return False
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.agent.respond_to_ui_request(request.id, {"value": self.state.agent_ui_value})
+            self.clear_agent_ui()
+            return True
+        if keyval in (Gdk.KEY_BackSpace, Gdk.KEY_Delete):
+            self.state.agent_ui_value = self.state.agent_ui_value[:-1]
+            self.ime.update()
+            self.canvas.queue_draw()
+            return True
+        if keyval == Gdk.KEY_space:
+            self.state.agent_ui_value += " "
+            self.canvas.queue_draw()
+            return True
+        char = Gdk.keyval_to_unicode(keyval)
+        if char and char >= 32:
+            self.state.agent_ui_value += chr(char)
+            self.canvas.queue_draw()
+            return True
+        return False
+
+    def clear_agent_ui(self) -> None:
+        self.state.agent_ui = None
+        self.state.agent_ui_value = ""
+        self.state.agent_ui_selected = 0
+        self.state.mode = "running"
+        self.state.status = "RUN"
+        self.im_preedit = ""
+        self.ime.reset()
+        self.canvas.queue_draw()
 
     def activate_settings_item(self) -> None:
         item = self.current_settings_item()
@@ -1198,7 +1384,7 @@ class RobotWindow(Gtk.ApplicationWindow):
                     if self.state.mode != "error":
                         self.state.mode = "confirm_transcript"
                         self.state.status = "READY"
-                elif self.state.mode != "error":
+                elif self.state.mode not in {"error", "agent_prompt"}:
                     self.state.mode = "result"
                     self.state.status = "DONE"
                     self.add_conversation_turn()
@@ -1214,6 +1400,8 @@ class RobotWindow(Gtk.ApplicationWindow):
                 self.state.last_message += event.text
             elif event.kind == "error":
                 self.set_error(event.text, queue_draw=False)
+            elif event.kind == "ui_request":
+                self.open_agent_ui_request(event.text)
             else:
                 self.state.events.append(event)
                 if event.kind == "status":
@@ -1221,6 +1409,32 @@ class RobotWindow(Gtk.ApplicationWindow):
         if changed:
             self.canvas.queue_draw()
         return True
+
+    def open_agent_ui_request(self, value: str) -> None:
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError:
+            return
+        request_id = str(payload.get("id") or "")
+        method = str(payload.get("method") or "")
+        if not request_id or method not in {"select", "confirm", "input", "editor"}:
+            return
+        options_value = payload.get("options")
+        options = [str(item) for item in options_value] if isinstance(options_value, list) else []
+        self.state.agent_ui = AgentUiRequest(
+            id=request_id,
+            method=method,
+            title=str(payload.get("title") or method),
+            message=str(payload.get("message") or ""),
+            placeholder=str(payload.get("placeholder") or payload.get("prefill") or ""),
+            options=options,
+        )
+        self.state.agent_ui_value = str(payload.get("prefill") or "")
+        self.state.agent_ui_selected = 0
+        self.state.mode = "agent_prompt"
+        self.state.status = "INPUT" if method in {"input", "editor"} else "ASK"
+        self.im_preedit = ""
+        self.ime.update()
 
     def add_conversation_turn(self) -> None:
         prompt = clean_agent_text(self.state.prompt)

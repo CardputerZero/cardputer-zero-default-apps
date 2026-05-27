@@ -235,6 +235,9 @@ input and optional speech-to-text transcripts to `pi --mode rpc`, then renders
 compact agent status, output, and errors in a 320x170 Cardputer Zero
 interface. Thinking and tool streams are intentionally collapsed into short
 status labels so the final response remains readable on the small display.
+Robot passes a small-screen response contract through Pi's system prompt
+configuration so answers prefer plain text, direct summaries, and short bullets
+over complex Markdown.
 
 ![Robot](docs/assets/screenshots/robot-current.png)
 
@@ -250,6 +253,8 @@ FULL -> --tools read,grep,find,ls,edit,write,bash
 Robot intentionally does not show per-tool approval prompts. The selected tools
 profile is the permission boundary exposed by the app; execution semantics
 belong to Pi, the current Linux user, and standard Linux authorization systems.
+When Pi asks for confirmation or text input through the RPC extension UI
+channel, Robot shows a compact prompt and sends the user's answer back to Pi.
 Speech-to-text is treated only as an input adapter: the transcript is shown
 before it is used as a Pi prompt.
 
